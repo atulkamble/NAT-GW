@@ -6,23 +6,9 @@ Region: `us-east-1` VPC: `10.0.0.0/16` Public Subnet: `10.0.1.0/24` Private Subn
 
 ## 1. Architecture
 
-```
-Internet
-   |
-Internet Gateway
-   |
-Public Subnet (10.0.1.0/24)
-   |-- Public EC2 (Bastion)
-   |-- NAT Gateway (Elastic IP)
-             |
-        Private Route
-             |
-Private Subnet (10.0.2.0/24)
-   |
-Private EC2
-   |
-Outbound Internet via NAT
-```
+![AWS NAT Gateway Architecture](NAT-GW.png)
+
+[View architecture diagram](https://github.com/atulkamble/AWS-NAT-Gateway-Project/blob/main/NAT-GW.png)
 
 ## 2. AWS CLI Commands
 
