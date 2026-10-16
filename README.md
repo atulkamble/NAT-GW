@@ -2,7 +2,11 @@
 
 Objective: Allow a private EC2 instance to access the internet using NAT Gateway.
 
-Region: `us-east-1` VPC: `10.0.0.0/16` Public Subnet: `10.0.1.0/24` Private Subnet: `10.0.2.0/24`
+**Region:** `us-east-1` | **VPC:** `10.0.0.0/16` | **Public subnet:** `10.0.1.0/24` | **Private subnet:** `10.0.2.0/24`
+
+**Prerequisites:** AWS CLI v2, configured IAM credentials with EC2/VPC and SSM parameter read permissions, SSH client, Bash/Zsh. Commands run on your laptop unless stated otherwise. **Charges apply** to NAT Gateway, EC2, and public IPv4 addresses. This is a single-AZ training lab, not a highly available production topology.
+
+**Verification scope:** Commands and order reviewed; live AWS provisioning and SSH/internet tests must be performed with your account.
 
 ## 1. Architecture
 
@@ -12,10 +16,14 @@ Region: `us-east-1` VPC: `10.0.0.0/16` Public Subnet: `10.0.1.0/24` Private Subn
 
 ## 2. AWS CLI Commands
 
+Run in the **same local terminal** to retain shell variables. Stop on any failed command instead of continuing with empty IDs.
+
 ### Step 1 – Configure environment
 
 ```
 export AWS_DEFAULT_REGION=us-east-1
+export AWS_PAGER=""
+aws --version
 export AZ=us-east-1a
 export MY_IP="$(curl -fsS -4 https://checkip.amazonaws.com)/32"
 
@@ -29,6 +37,9 @@ VPC_ID=$(aws ec2 create-vpc \
   --cidr-block 10.0.0.0/16 \
   --query 'Vpc.VpcId' --output text)
 
+aws ec2 wait vpc-available --vpc-ids "$VPC_ID"
+aws ec2 modify-vpc-attribute \
+  --vpc-id "$VPC_ID" --enable-dns-support
 aws ec2 modify-vpc-attribute \
   --vpc-id "$VPC_ID" --enable-dns-hostnames
 ```
@@ -50,6 +61,8 @@ PRIVATE_SUBNET=$(aws ec2 create-subnet \
 
 aws ec2 modify-subnet-attribute \
   --subnet-id "$PUBLIC_SUBNET" --map-public-ip-on-launch
+aws ec2 modify-subnet-attribute \
+  --subnet-id "$PRIVATE_SUBNET" --no-map-public-ip-on-launch
 ```
 
 ### Step 4 – Create Internet Gateway
@@ -96,6 +109,9 @@ NAT_ID=$(aws ec2 create-nat-gateway \
 
 aws ec2 wait nat-gateway-available \
   --nat-gateway-ids "$NAT_ID"
+
+aws ec2 describe-nat-gateways --nat-gateway-ids "$NAT_ID" \
+  --query 'NatGateways[0].[NatGatewayId,State,SubnetId]' --output table
 ```
 
 ### Step 7 – Configure private route table
@@ -163,6 +179,7 @@ PUBLIC_EC2=$(aws ec2 run-instances \
   --subnet-id "$PUBLIC_SUBNET" \
   --security-group-ids "$PUBLIC_SG" \
   --associate-public-ip-address \
+  --metadata-options HttpTokens=required,HttpEndpoint=enabled \
   --query 'Instances[0].InstanceId' --output text)
 
 PRIVATE_EC2=$(aws ec2 run-instances \
@@ -171,6 +188,7 @@ PRIVATE_EC2=$(aws ec2 run-instances \
   --key-name "$KEY_NAME" \
   --network-interfaces \
   "DeviceIndex=0,SubnetId=$PRIVATE_SUBNET,Groups=[$PRIVATE_SG],AssociatePublicIpAddress=false" \
+  --metadata-options HttpTokens=required,HttpEndpoint=enabled \
   --query 'Instances[0].InstanceId' --output text)
 
 aws ec2 wait instance-running \
@@ -196,6 +214,8 @@ echo "Private IP: $PRIVATE_IP"
 
 ## 3. Connect and test
 
+Allow instance boot/SSH initialization. This lab uses Amazon Linux 2023 (`ec2-user`). For the first SSH connection, verify the server host-key fingerprint before accepting it.
+
 Connect directly to private EC2 through the bastion from your laptop:
 
 ```
@@ -210,7 +230,8 @@ Run inside private EC2:
 hostname -I
 curl -4 -I https://www.google.com
 curl -4 https://checkip.amazonaws.com
-sudo dnf update -y
+sudo dnf check-update || test "$?" -eq 100
+sudo dnf install -y git
 ```
 
 Verify NAT Elastic IP from your laptop:
@@ -222,11 +243,22 @@ aws ec2 describe-addresses \
   --output text
 ```
 
-The public IP returned from private EC2 should match the NAT Elastic IP.
+The public IP returned from private EC2 **must match** the NAT Elastic IP. Check that the private instance has no public IPv4:
+
+```bash
+aws ec2 describe-instances --instance-ids "$PRIVATE_EC2" \
+  --query 'Reservations[0].Instances[0].[PrivateIpAddress,PublicIpAddress]' --output table
+aws ec2 describe-route-tables --route-table-ids "$PUBLIC_RT" "$PRIVATE_RT" \
+  --query 'RouteTables[*].[RouteTableId,Routes]' --output json
+```
+
+**Expected:** public route `0.0.0.0/0 → igw-*`; private route `0.0.0.0/0 → nat-*`; private instance `PublicIpAddress` is `None`.
+
+**Troubleshooting:** Confirm NAT is `available`, routes are associated with their intended subnets, default SG egress permits HTTPS, VPC DNS is enabled, and NACLs allow return traffic. SSH to the bastion is limited to `$MY_IP`; private SSH is limited to the bastion SG.
 
 ## 4. Cleanup commands
 
-Run from your original local terminal.
+Run from your original local terminal **with the original variables available**. These commands permanently delete this lab. If using a new terminal, you must restore your real IDs first.
 
 ```
 # Terminate instances
@@ -275,6 +307,7 @@ aws ec2 delete-vpc --vpc-id "$VPC_ID"
 
 # Delete key pair
 aws ec2 delete-key-pair --key-name "$KEY_NAME"
+ssh-add -d "./$KEY_NAME.pem" 2>/dev/null || true
 rm -f "./$KEY_NAME.pem"
 ```
 
@@ -288,4 +321,6 @@ rm -f "./$KEY_NAME.pem"
 - NAT Gateway → Outbound IPv4 connectivity, not unsolicited inbound access.
 - NAT Gateway and public IPv4 addresses incur charges until released or deleted.
 
-Expected result: Private EC2 successfully accesses the internet through NAT Gateway without having a public IP address.
+**Expected result:** Private EC2 accesses internet via NAT Gateway without a public IP. Confirm IP equality with `checkip.amazonaws.com`, then perform cleanup. Verify VPC and Elastic IP deletion using `describe-vpcs` and `describe-addresses` (resource-not-found responses expected).
+
+**AWS documentation:** [NAT gateway basics](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html) · [Create a NAT gateway](https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-working-with.html) · [VPC routing](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Route_Tables.html)
